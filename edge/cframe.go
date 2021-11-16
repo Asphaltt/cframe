@@ -29,11 +29,11 @@ type Server struct {
 }
 
 type peerConn struct {
-	addr string
+	addr *net.UDPAddr
 	// conn *net.UDPConn
 	// conn *kcp.UDPSession
 	// conn net.Conn
-	cidr string
+	cidr *net.IPNet
 }
 
 func NewServer(laddr, key string, iface *Interface) *Server {
@@ -127,19 +127,13 @@ func (s *Server) readLocal(sock *net.UDPConn) {
 		}
 
 		AddTrafficOut(int64(len(pkt)))
-		src := p.Src()
-		dst := p.Dst()
-		log.Debug("tuple %s => %s", src, dst)
 
-		peer, err := s.route(dst)
-		if err != nil {
-			log.Error("[E] not route to host: ", dst)
-			continue
-		}
+		srcIP, dstIP := p.SrcIP(), p.DstIP()
+		log.Debug("tuple %s => %s", srcIP, dstIP)
 
-		raddr, err := net.ResolveUDPAddr("udp", peer)
+		peer, err := s.route(dstIP)
 		if err != nil {
-			log.Error("parse %s fail: %v", peer, err)
+			log.Error("[E] not route to host: ", dstIP.String())
 			continue
 		}
 
@@ -147,38 +141,17 @@ func (s *Server) readLocal(sock *net.UDPConn) {
 		buf := make([]byte, 0, len(pkt)+len(s.key))
 		buf = append(buf, []byte(s.key)...)
 		buf = append(buf, pkt...)
-		_, e := sock.WriteToUDP(buf, raddr)
+		_, e := sock.WriteToUDP(buf, peer)
 		if e != nil {
 			log.Error("%v", e)
 		}
 	}
 }
 
-func (s *Server) route(dst string) (string, error) {
+func (s *Server) route(dst net.IP) (*net.UDPAddr, error) {
 	for _, p := range s.peerConns {
-		_, ipnet, err := net.ParseCIDR(p.cidr)
-		if err != nil {
-			log.Error("parse cidr fail: %v", err)
-			continue
-		}
-
-		sp := strings.Split(p.cidr, "/")
-		if len(sp) != 2 {
-			log.Error("parse cidr fail: %v", err)
-			continue
-		}
-
-		dstCidr := fmt.Sprintf("%s/%s", dst, sp[1])
-		_, dstNet, err := net.ParseCIDR(dstCidr)
-		if err != nil {
-			log.Error("parse cidr fail: %v", err)
-			continue
-		}
-
-		if ipnet.String() == dstNet.String() {
-			// ignore peer ip address
-			ip, _, _ := net.SplitHostPort(p.addr)
-			if ip == dst {
+		if p.cidr.Contains(dst) {
+			if p.addr.IP.Equal(dst) {
 				continue
 			}
 
@@ -186,7 +159,7 @@ func (s *Server) route(dst string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("no route")
+	return nil, fmt.Errorf("no route")
 }
 
 func (s *Server) addRoute(peer *codec.Edge) error {
@@ -228,9 +201,11 @@ func (s *Server) addRoute(peer *codec.Edge) error {
 		peer.Cidr = fmt.Sprintf("%s/32", ipmask[0])
 	}
 
+	_, peerCidr, _ := net.ParseCIDR(peer.Cidr)
+	peerAddr, _ := net.ResolveUDPAddr("udp", peer.ListenAddr)
 	s.peerConns[peer.Cidr] = &peerConn{
-		addr: peer.ListenAddr,
-		cidr: peer.Cidr,
+		addr: peerAddr,
+		cidr: peerCidr,
 	}
 
 	log.Info("added peer %v OK", peer)
